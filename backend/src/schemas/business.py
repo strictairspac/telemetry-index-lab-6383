@@ -1,6 +1,7 @@
 from pydantic import BaseModel,Field,model_validator
 from datetime import datetime
 from src.constants.enums import COLUMNS
+import re
 class Login(BaseModel):
  email:str;password:str
 class WorkloadInput(BaseModel):
@@ -29,3 +30,10 @@ class CandidateInput(BaseModel):
 class ExperimentInput(BaseModel):
  name:str=Field(min_length=2,max_length=120)
  candidate_id:int
+class SampleImportInput(BaseModel):
+ batch_no:str=Field(min_length=2,max_length=60)
+ content:str=Field(min_length=1,max_length=30_000_000)
+ @model_validator(mode='after')
+ def batch_no_valid(self):
+  if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*',self.batch_no):raise ValueError('批次号只能包含字母、数字、点、横线、下划线，且以字母或数字开头')
+  return self

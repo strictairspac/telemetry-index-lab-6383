@@ -3,9 +3,9 @@
 为岩川设备可靠性组 12 人把检索负载、索引候选与真实 MySQL 试验串成可复查工作流。
 
 ## 业务场景
-上游来自泵站温升告警与值班 SQL 文件。过去同事在表格记录列顺序、手动建索引后截取计划，存在参数版本混乱、前后结果不一致未发现、写入代价未记录三项痛点。本站生成固定 SELECT，在专用 5,000 行遥测库内串行建索引、采集执行计划、保存输入快照，交给可靠性复核人判断。
+上游来自泵站温升告警与值班 SQL 文件。过去同事在表格记录列顺序、手动建索引后截取计划，存在参数版本混乱、前后结果不一致未发现、写入代价未记录三项痛点。本站生成固定 SELECT，在专用遥测库内串行建索引、采集执行计划、保存输入快照，交给可靠性复核人判断。
 
-模块：工作负载录入/编辑、候选列序设计、后台试验队列、真实结果对比/JSON 导出；管理员另有审计。核心实体 workloads / candidates / experiments，样本表 telemetry。
+模块：工作负载录入/编辑、候选列序设计、后台试验队列、真实结果对比/JSON 导出、样本批次导入；管理员另有审计。核心实体 workloads / candidates / experiments / sample_batches，样本数据按批次存于 telemetry 与 telemetry_batch_<id>。
 
 ## 快速启动
 ```sh
@@ -33,17 +33,20 @@ docker compose exec -T backend python -m scripts.seed_demo
 7. 09:30 导出 `trial-<id>.json`，viewer 登录只读复核。
 8. 10:00 admin 查看审计记录并检查执行完成事件。
 
-种子含三账号、三负载、三候选与 5,000 遥测行。固定公式生成，不依赖随机数。seed 根据自然键/id补缺，不覆盖用户编辑。范围错误/非法列/重复名称有错误响应，空结果仍可正常比较。
+种子含三账号、三负载、三候选与 5,000 遥测行（初始批次 `seed-20261101`）。固定公式生成，不依赖随机数。seed 根据自然键/id补缺，不覆盖用户编辑。范围错误/非法列/重复名称有错误响应，空结果仍可正常比较。
+
+## 样本批次
+`POST /samples/import` 接收 `{batch_no, content}`（CSV，表头 `sensor_id,recorded_at,device_type,value`）。批次号 + 文件内容 SHA-256 识别重试：同批同内容幂等返回不重复生效；同批异内容返回 409。任一行坏数据或 (sensor_id, recorded_at) 重复使整批失败（422），当前生效批次不变。全部校验通过并装载到独立 `telemetry_batch_<id>` 表后，一次元数据事务原子替换生效批次；进程中断留下 `importing` 批次，同内容重试可恢复。试验创建时绑定当前批次并入快照，排队或执行期间换批不受影响；前后查询、EXPLAIN 与 20 行写探针全部落在所绑定批次表内，结果 JSON 注明批次号与内容哈希。导入与试验并发进行，换批不等待长试验结束；退役批次表在没有排队/执行中的试验引用后才被清理。`GET /samples`、`GET /samples/current` 查看批次。
 
 ## 算法与真实边界
-Python 对索引从左到右分析，匹配相等列每列 +40，首个时间范围列 +20 后停止，最高100。缺失首列停止。启发式不等于优化器成本。worker 使用 MySQL GET_LOCK 串行隔离，删除遗留试验索引 → 无候选基线 EXPLAIN/查询5次 → 建候选索引/ANALYZE → 查询5次和EXPLAIN → 校验有序全结果SHA-256 → 清理索引。数据固定、查询参数固定可复现，耗时受缓存和驱动波动影响，不保证提速。20 行写探针是真实 INSERT 后 ROLLBACK，可能消耗 auto_increment 序列号。试验只修改专用 telemetry 表，不能接受任意SQL或远端数据库。任务使用简单 Redis 单消费者，进程崩溃后的 running 任务不自动重试，保留状态供人工复查并新建任务。
+Python 对索引从左到右分析，匹配相等列每列 +40，首个时间范围列 +20 后停止，最高100。缺失首列停止。启发式不等于优化器成本。worker 使用 MySQL GET_LOCK 串行隔离，删除遗留试验索引 → 无候选基线 EXPLAIN/查询5次 → 建候选索引/ANALYZE → 查询5次和EXPLAIN → 校验有序全结果SHA-256 → 清理索引，全部作用于试验绑定的批次表。数据固定、查询参数固定可复现，耗时受缓存和驱动波动影响，不保证提速。20 行写探针是真实 INSERT 后 ROLLBACK，可能消耗 auto_increment 序列号。试验只修改专用样本批次表，不能接受任意SQL或远端数据库。任务使用简单 Redis 单消费者，进程崩溃后的 running 任务不自动重试，保留状态供人工复查并新建任务。
 
 ## 技术与目录
 Python3.11 / FastAPI / SQLAlchemy / PyMySQL / Redis；MySQL8.0；原生 HTML CSS ES modules；nginx1.27。恰好五容器 frontend/backend/worker/db/redis，均有健康探针。数据库、Redis、应用产物各用命名卷。
 
 `backend/src` 按 models/schemas/services/controllers/routes/middlewares/config/constants/utils 分层；`backend/scripts/seed_demo.py`；`backend/migrations` 记录元数据建表版本。`frontend/src` 按 api/stores/pages/components/common/hooks/router/types/constants/utils 分层。截图、测试脚本及测试报告在批次根目录 `test-artifacts/gb-4102`，不放源码。
 
-共享枚举：角色和状态在 `backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js`；服务/权限与前端状态组件使用一致枚举。前端共享 table/status/feedback；hooks forms/poll。双字体来自 Google Fonts（网络不可用时回退 sans-serif/monospace）。赭红工业试验纸视觉，支持桌面/平板/手机。
+共享枚举：角色、试验状态与批次状态在 `backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js`；服务/权限与前端状态组件使用一致枚举。前端共享 table/status/feedback；hooks forms/poll。双字体来自 Google Fonts（网络不可用时回退 sans-serif/monospace）。赭红工业试验纸视觉，支持桌面/平板/手机。
 
 环境变量 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET、SEED_DEMO。容器内 DATABASE_URL/REDIS_URL 来自 Compose。SEED_DEMO启动失败仅记录日志；正常启动一次自然键补缺。全局错误处理/请求追踪中间件、JWT授权与业务审计横切。
 

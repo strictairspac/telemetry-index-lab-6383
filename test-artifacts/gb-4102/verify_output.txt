@@ -1,0 +1,108 @@
+== setup: restart uvicorn under script control ==
+== reset: clean prior verification state ==
+== T0 authz ==
+  PASS 未登录读批次返回 401
+  PASS viewer 导入返回 403
+== T1 整批导入并原子替换 ==
+  PASS 导入返回 200 — {'id': 20, 'batch_no': 'verify-b1', 'content_hash': '9545382591412ebbf91f362da556bb42a1f1859c02ef4b267b71205f890527a6', 'row_count': 200, 'status': 'active', 'table_name': 'telemetry_batch_20', 'error
+  PASS 新批次生效 — {'id': 20, 'batch_no': 'verify-b1', 'content_hash': '9545382591412ebbf91f362da556bb42a1f1859c02ef4b267b71205f890527a6', 'row_count': 200, 'status': 'active', 'table_name': 'telemetry_batch_20', 'error': None, 'created_at': '2026-11-17T12:31:19', 'activated_at': '2026-11-17T12:31:20', 'replayed': False}
+  PASS 非幂等标记
+  PASS current 指向新批次
+  PASS 种子批次已退役且表受保护 — (('retired',),)
+  PASS 批次表行数精确
+== T2 同批同内容幂等重试 ==
+  PASS 重试返回 200 且标记幂等 — {'id': 20, 'batch_no': 'verify-b1', 'content_hash': '9545382591412ebbf91f362da556bb42a1f1859c02ef4b267b71205f890527a6', 'row_count': 200, 'status': 'active', 'table_name': 'telemetry_batch_20', 'error
+  PASS 重试不重复生效(仍 200 行)
+  PASS 批次记录只有一条
+== T3 同批异内容拒绝 ==
+  PASS 同批异内容返回 409 — {'detail': '批次号已存在但文件内容不同，已拒绝；重试请使用原批次文件，换内容请用新批次号'}
+  PASS 生效批次未被污染
+== T4 坏行使整批失败并保留旧版 ==
+  PASS 坏行返回 422 — {'detail': '样本校验失败，整批未导入，当前批次保持不变：第202行 recorded_at 不是 ISO 时间：not-a-time'}
+  PASS 失败批次留痕 failed — (('failed', '第202行 recorded_at 不是 ISO 时间：not-a-time'),)
+  PASS 旧版批次保留
+  PASS 失败批次未建数据表
+== T5 重复记录使整批失败 ==
+  PASS 重复记录返回 422 — {'detail': '样本校验失败，整批未导入，当前批次保持不变：第3行与前面记录重复：sensor_id=17 recorded_at=2026-11-01T00:00:00'}
+  PASS 旧版批次仍保留
+== T6 排队试验跨批执行 + 换批不等待长试验 + 引用释放前不清理 ==
+  PASS 试验创建成功 — {'id': 7, 'name': 'verify-cross-batch', 'workload_id': 1, 'candidate_id': 1, 'batch_id': 20, 'status': 'queued', 'result': None, 'error': None, 'snapshot': {'batch': {'id': 20, 'batch_no': 'verify-b1'
+  PASS 创建时绑定当前批次 verify-b1 — {'id': 7, 'name': 'verify-cross-batch', 'workload_id': 1, 'candidate_id': 1, 'batch_id': 20, 'status': 'queued', 'result': None, 'error': None, 'snapshot': {'batch': {'id': 20, 'batch_no': 'verify-b1', 'row_count': 200, 'table_name': 'telemetry_batch_20', 'content_hash': '9545382591412ebbf91f362da55
+  PASS 长试验期间换批成功且未等待 — 0.1s
+  PASS 换批后 current 为 verify-b2
+  PASS 引用未释放，旧批次表未清理
+  PASS 旧批次状态 retired(未清理) — (('retired',),)
+  PASS 跨批试验完成
+  PASS 结果注明批次 verify-b1 — {'id': 20, 'batch_no': 'verify-b1', 'row_count': 200, 'content_hash': '9545382591412ebbf91f362da556bb42a1f1859c02ef4b267b71205f890527a6'}
+  PASS 查询落在原批次表 — SELECT id,sensor_id,recorded_at,device_type,value FROM `telemetry_batch_20` WHERE sensor_id=:sensor AND recorded_at>=:start AND recorded_at<=:end ORDER BY id
+  PASS 结果行数来自原批次(40) — 40
+  PASS 引用释放后旧批次被清理
+  PASS 旧批次表已删除
+== T7 前后查询与写探针均隔离 + 结果注明批次 ==
+  PASS 第二个试验绑定 verify-b2 — {'id': 8, 'name': 'verify-isolation', 'workload_id': 1, 'candidate_id': 1, 'batch_id': 23, 'status': 'queued', 'result': None, 'error': None, 'snapshot': {'batch': {'id': 23, 'batch_no': 'verify-b2', 
+  PASS 结果注明批次 verify-b2
+  PASS EXPLAIN 落在 verify-b2 表
+  PASS 结果行数来自 verify-b2(75) — 75
+  PASS 写探针消耗了 verify-b2 的序列号 — auto_increment=321
+  PASS 写探针未触及其他批次表 — telemetry auto_increment=5001
+  PASS 导出 JSON 注明批次
+== T8 导入中断(SIGKILL)后可恢复，重试不重复生效 ==
+  PASS 中断后批次停留在 importing — kill 落点:during-load (('importing', 'telemetry_batch_24'),)
+  PASS 恢复重试成功并生效 — 0.9s {'id': 24, 'batch_no': 'verify-big', 'content_hash': '12e09ff483d5091c53b1f3344447bb50cd46baf7dd235eee2be71a6e0ba92a40', 'row_count': 100000, 'status': 'active'
+  PASS 恢复后表行数精确(不重复)
+  PASS 批次记录仍只有一条
+  PASS 恢复后再重试为幂等
+  PASS 恢复后同批异内容仍拒绝
+== T9 并发同内容重试只生效一次 ==
+  PASS 并发重试均 200 — 200,200
+  PASS 恰好一次生效一次幂等 — [False, True]
+  PASS 并发后只有一条批次记录
+
+ALL 47 CHECKS PASSED
+  - 未登录读批次返回 401
+  - viewer 导入返回 403
+  - 导入返回 200
+  - 新批次生效
+  - 非幂等标记
+  - current 指向新批次
+  - 种子批次已退役且表受保护
+  - 批次表行数精确
+  - 重试返回 200 且标记幂等
+  - 重试不重复生效(仍 200 行)
+  - 批次记录只有一条
+  - 同批异内容返回 409
+  - 生效批次未被污染
+  - 坏行返回 422
+  - 失败批次留痕 failed
+  - 旧版批次保留
+  - 失败批次未建数据表
+  - 重复记录返回 422
+  - 旧版批次仍保留
+  - 试验创建成功
+  - 创建时绑定当前批次 verify-b1
+  - 长试验期间换批成功且未等待
+  - 换批后 current 为 verify-b2
+  - 引用未释放，旧批次表未清理
+  - 旧批次状态 retired(未清理)
+  - 跨批试验完成
+  - 结果注明批次 verify-b1
+  - 查询落在原批次表
+  - 结果行数来自原批次(40)
+  - 引用释放后旧批次被清理
+  - 旧批次表已删除
+  - 第二个试验绑定 verify-b2
+  - 结果注明批次 verify-b2
+  - EXPLAIN 落在 verify-b2 表
+  - 结果行数来自 verify-b2(75)
+  - 写探针消耗了 verify-b2 的序列号
+  - 写探针未触及其他批次表
+  - 导出 JSON 注明批次
+  - 中断后批次停留在 importing
+  - 恢复重试成功并生效
+  - 恢复后表行数精确(不重复)
+  - 批次记录仍只有一条
+  - 恢复后再重试为幂等
+  - 恢复后同批异内容仍拒绝
+  - 并发重试均 200
+  - 恰好一次生效一次幂等
+  - 并发后只有一条批次记录

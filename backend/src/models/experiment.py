@@ -6,6 +6,7 @@ class Experiment(Base):
  name=Column(String(120),unique=True,nullable=False)
  workload_id=Column(Integer,ForeignKey('workloads.id'),nullable=False)
  candidate_id=Column(Integer,ForeignKey('candidates.id'),nullable=False)
+ batch_id=Column(Integer,ForeignKey('sample_batches.id'),nullable=True)
  status=Column(String(20),default='queued',nullable=False)
  result=Column(JSON,nullable=True)
  error=Column(String(1000),nullable=True)
